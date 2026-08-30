@@ -1,0 +1,340 @@
+// ============================================================================
+// Multi-tenant dropshipping SaaS — Phase 1 schema
+//
+// Multi-tenancy: single shared schema, single database. Every tenant-scoped
+// table carries a tenantId foreign key rather than living in its own
+// schema or database. Super Admin queries/joins across tenants directly.
+//
+// Product sourcing: Super Admin curates a GlobalProduct catalog (sourced
+// from Suppliers). Each tenant's Product either imports from that catalog
+// (source = GLOBAL_CATALOG, globalProductId set) or is fully tenant-owned
+// (source = OWN_PRODUCT, globalProductId null). Enforcing that pairing is
+// left to the application layer — Prisma doesn't support conditional
+// column constraints.
+// ============================================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ----------------------------------------------------------------------------
+// Enums
+// ----------------------------------------------------------------------------
+
+enum TenantStatus {
+  TRIAL
+  ACTIVE
+  SUSPENDED
+  CANCELLED
+}
+
+enum UserRole {
+  SUPER_ADMIN
+  MERCHANT_OWNER
+  MERCHANT_STAFF
+}
+
+enum ProductSource {
+  GLOBAL_CATALOG
+  OWN_PRODUCT
+}
+
+enum OrderStatus {
+  PENDING
+  FOLLOW_UP
+  APPROVED
+  SEND_TO_SUPPLIER
+  READY_TO_SHIP
+  IN_TRANSIT
+  DELIVERED
+  COMPLETED
+  RETURNED
+  CANCELLED
+}
+
+enum TransactionType {
+  ORDER_CREDIT
+  SUPPLIER_COST
+  WITHDRAWAL
+  REFUND
+  ADJUSTMENT
+  PLATFORM_FEE
+}
+
+enum TransactionStatus {
+  PENDING
+  COMPLETED
+  FAILED
+}
+
+// ----------------------------------------------------------------------------
+// Tenant — the merchant / store, and the anchor for every tenant-scoped table
+// ----------------------------------------------------------------------------
+
+model Tenant {
+  id           String       @id @default(cuid())
+  name         String
+  subdomain    String       @unique
+  customDomain String?      @unique
+  status       TenantStatus @default(TRIAL)
+  logoUrl      String?
+
+  users     User[]
+  products  Product[]
+  orders    Order[]
+  customers Customer[]
+  account   Account?
+  settings  StoreSetting?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([subdomain])
+}
+
+// ----------------------------------------------------------------------------
+// User — platform staff and merchant staff. tenantId is null for SUPER_ADMIN.
+// ----------------------------------------------------------------------------
+
+model User {
+  id       String  @id @default(cuid())
+  tenantId String?
+  tenant   Tenant? @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  role         UserRole
+  name         String
+  email        String   @unique
+  passwordHash String
+  phone        String?
+  isActive     Boolean  @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([tenantId])
+}
+
+// ----------------------------------------------------------------------------
+// Supplier — platform-level sourcing partner, managed by Super Admin.
+// Not tenant-scoped: this is the hub side of the hub-and-spoke model.
+// ----------------------------------------------------------------------------
+
+model Supplier {
+  id           String  @id @default(cuid())
+  name         String
+  contactEmail String?
+  contactPhone String?
+  country      String?
+  notes        String?
+
+  globalProducts GlobalProduct[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+// ----------------------------------------------------------------------------
+// GlobalProduct — Super Admin's central catalog. Tenants import from this
+// into their own Product table rather than selling it directly.
+// ----------------------------------------------------------------------------
+
+model GlobalProduct {
+  id         String   @id @default(cuid())
+  supplierId String
+  supplier   Supplier @relation(fields: [supplierId], references: [id])
+
+  title          String
+  description    String?
+  images         String[]
+  basePrice      Decimal  @db.Decimal(12, 2)
+  suggestedPrice Decimal? @db.Decimal(12, 2)
+  sku            String?  @unique
+  category       String?
+  isActive       Boolean  @default(true)
+
+  importedAsProducts Product[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([supplierId])
+}
+
+// ----------------------------------------------------------------------------
+// Product — tenant-owned catalog entry. Either mirrors a GlobalProduct
+// (source = GLOBAL_CATALOG) or is fully custom (source = OWN_PRODUCT).
+// ----------------------------------------------------------------------------
+
+model Product {
+  id       String @id @default(cuid())
+  tenantId String
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  source          ProductSource
+  globalProductId String?
+  globalProduct   GlobalProduct? @relation(fields: [globalProductId], references: [id])
+
+  title       String
+  description String?
+  images      String[]
+  price       Decimal  @db.Decimal(12, 2)
+  costPrice   Decimal? @db.Decimal(12, 2)
+  sku         String?
+  stock       Int?     @default(0)
+  isActive    Boolean  @default(true)
+
+  orderItems OrderItem[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([tenantId, sku])
+  @@index([tenantId])
+  @@index([globalProductId])
+}
+
+// ----------------------------------------------------------------------------
+// Customer — end-shopper, scoped to one tenant's storefront.
+// ----------------------------------------------------------------------------
+
+model Customer {
+  id       String @id @default(cuid())
+  tenantId String
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  name    String
+  phone   String
+  email   String?
+  address String?
+  city    String?
+
+  orders Order[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([tenantId, phone])
+  @@index([tenantId])
+}
+
+// ----------------------------------------------------------------------------
+// Order + OrderItem — the Boneek-style dropship order lifecycle.
+// ----------------------------------------------------------------------------
+
+model Order {
+  id       String @id @default(cuid())
+  tenantId String
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  customerId String
+  customer   Customer @relation(fields: [customerId], references: [id])
+
+  orderNumber String
+  status      OrderStatus @default(PENDING)
+
+  subtotal    Decimal @db.Decimal(12, 2)
+  shippingFee Decimal @default(0) @db.Decimal(12, 2)
+  total       Decimal @db.Decimal(12, 2)
+
+  shippingAddress   String
+  shippingCity      String?
+  shippingZone      String? // e.g. "inside_dhaka" / "outside_dhaka" — drives shippingFee at checkout
+  shippingPhone     String
+  courierName       String?
+  courierTrackingId String?
+
+  items        OrderItem[]
+  transactions Transaction[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([tenantId, orderNumber])
+  @@index([tenantId])
+  @@index([customerId])
+  @@index([status])
+}
+
+model OrderItem {
+  id      String @id @default(cuid())
+  orderId String
+  order   Order  @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  productId String
+  product   Product @relation(fields: [productId], references: [id])
+
+  quantity  Int
+  unitPrice Decimal  @db.Decimal(12, 2)
+  unitCost  Decimal? @db.Decimal(12, 2)
+
+  createdAt DateTime @default(now())
+
+  @@index([orderId])
+  @@index([productId])
+}
+
+// ----------------------------------------------------------------------------
+// Account + Transaction — per-tenant balance and its ledger. Order revenue,
+// supplier costs, platform fees, and withdrawals all post here.
+// ----------------------------------------------------------------------------
+
+model Account {
+  id       String @id @default(cuid())
+  tenantId String @unique
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  balance       Decimal @default(0) @db.Decimal(12, 2)
+  currency      String  @default("BDT")
+  payoutDetails Json?
+
+  transactions Transaction[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Transaction {
+  id        String  @id @default(cuid())
+  accountId String
+  account   Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  type   TransactionType
+  status TransactionStatus @default(COMPLETED)
+  amount Decimal @db.Decimal(12, 2)
+  note   String?
+
+  orderId String?
+  order   Order?  @relation(fields: [orderId], references: [id])
+
+  createdAt DateTime @default(now())
+
+  @@index([accountId])
+  @@index([orderId])
+}
+
+// ----------------------------------------------------------------------------
+// StoreSetting — per-tenant branding + integration config. JSON blobs keep
+// payment/courier config extensible without a migration per new provider.
+// ----------------------------------------------------------------------------
+
+model StoreSetting {
+  id       String @id @default(cuid())
+  tenantId String @unique
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  storeName    String?
+  primaryColor String?
+  heroTitle    String?
+  heroSubtitle String?
+
+  paymentSettings Json?
+  courierSettings Json?
+  metadata        Json?
+
+  updatedAt DateTime @updatedAt
+}
