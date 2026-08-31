@@ -26,9 +26,23 @@ export function middleware(req: NextRequest) {
 
   // *.localhost resolves natively in Chrome/Firefox — no /etc/hosts editing for local dev.
   const isLocalDev = hostname === "localhost" || hostname.endsWith(".localhost");
-  const rootDomain = isLocalDev ? "localhost" : ROOT_DOMAIN;
+  const isVercelDefault = hostname.endsWith(".vercel.app");
 
-  const subdomain = extractSubdomain(hostname, rootDomain);
+  // Vercel-এর ডিফল্ট .vercel.app ডোমেনের জন্য ডাইনামিক রুট ডোমেন নির্ধারণ
+  const rootDomain = isLocalDev 
+    ? "localhost" 
+    : isVercelDefault 
+      ? hostname 
+      : ROOT_DOMAIN;
+
+  let subdomain = extractSubdomain(hostname, rootDomain);
+
+  // Vercel-এর ডিফল্ট ডোমেনে সাবডোমেন ছাড়া /login বা /app রাউটে গেলে সরাসরি হ্যান্ডেল করার জন্য:
+  if (isVercelDefault && subdomain === "") {
+    if (url.pathname.startsWith("/login") || url.pathname.startsWith("/app")) {
+      subdomain = "app";
+    }
+  }
 
   if (subdomain === null) {
     // Doesn't match our root domain — this is where a merchant's Tenant.customDomain
@@ -58,8 +72,12 @@ export function middleware(req: NextRequest) {
     if (isApiRoute) {
       return NextResponse.next({ request: { headers: requestHeaders } });
     }
+
+    // রাউট ওভারল্যাপ এড়াতে ডাইনামিক পাথ চেকিং
+    const pathname = url.pathname.startsWith("/app") ? url.pathname : `/app${url.pathname}`;
+
     return NextResponse.rewrite(
-      new URL(`/app${url.pathname}${url.search}`, req.url),
+      new URL(`${pathname}${url.search}`, req.url),
       { request: { headers: requestHeaders } }
     );
   }
