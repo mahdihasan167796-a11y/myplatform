@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { TenantStatus } from "@prisma/client";
 
+export const dynamic = 'force-dynamic';
 // Flat per-zone courier rates. Worth moving into StoreSetting.courierSettings
 // (already on the schema) once merchants need their own rates instead of a
 // single platform-wide table.
