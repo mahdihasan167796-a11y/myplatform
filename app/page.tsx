@@ -8,7 +8,7 @@ export default function MarketingPage() {
         and one dashboard.
       </p>
       <a
-        href="http://app.localhost:3000/login"
+        href="/login"
         className="mt-6 rounded-md bg-indigo-600 px-5 py-2.5 text-sm font-medium text-white hover:bg-indigo-700"
       >
         Merchant sign in
